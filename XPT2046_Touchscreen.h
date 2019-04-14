@@ -18,47 +18,73 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
+ *
+ * Adapted for use with the c't-Bot teensy framework and ported to C++14 by Timo Sandmann
  */
 
-#ifndef _XPT2046_Touchscreen_h_
-#define _XPT2046_Touchscreen_h_
+#pragma once
 
 #include "Arduino.h"
-#include <SPI.h>
+#include "SPI.h"
 
-#if ARDUINO < 10600
-#error "Arduino 1.6.0 or later (SPI library) is required"
-#endif
+#include <cstdint>
+
 
 class TS_Point {
 public:
-	TS_Point(void) : x(0), y(0), z(0) {}
-	TS_Point(int16_t x, int16_t y, int16_t z) : x(x), y(y), z(z) {}
-	bool operator==(TS_Point p) { return ((p.x == x) && (p.y == y) && (p.z == z)); }
-	bool operator!=(TS_Point p) { return ((p.x != x) || (p.y != y) || (p.z != z)); }
-	int16_t x, y, z;
+    TS_Point() : x {}, y {}, z {} {}
+
+    TS_Point(int16_t x, int16_t y, int16_t z) : x { x }, y { y }, z { z } {}
+
+    bool operator==(TS_Point p) {
+        return ((p.x == x) && (p.y == y) && (p.z == z));
+    }
+
+    bool operator!=(TS_Point p) {
+        return ((p.x != x) || (p.y != y) || (p.z != z));
+    }
+
+    int16_t x, y, z;
 };
 
 class XPT2046_Touchscreen {
 public:
-	constexpr XPT2046_Touchscreen(uint8_t cspin, uint8_t tirq=255)
-		: csPin(cspin), tirqPin(tirq) { }
-	bool begin();
-	TS_Point getPoint();
-	bool tirqTouched();
-	bool touched();
-	void readData(uint16_t *x, uint16_t *y, uint8_t *z);
-	bool bufferEmpty();
-	uint8_t bufferSize() { return 1; }
-	void setRotation(uint8_t n) { rotation = n % 4; }
-// protected:
-	volatile bool isrWake=true;
+    XPT2046_Touchscreen(uint8_t cspin, SPIClass* p_spi = &SPI, uint8_t tirq = 255);
+
+    bool begin();
+    TS_Point getPoint();
+    bool tirqTouched() const;
+    bool touched();
+    void readData(uint16_t* x, uint16_t* y, uint8_t* z);
+    bool bufferEmpty() const;
+
+    uint8_t bufferSize() const {
+        return 1;
+    }
+
+    void setRotation(uint8_t n) {
+        rotation_ = n % 4;
+    }
 
 private:
-	void update();
-	uint8_t csPin, tirqPin, rotation=1;
-	int16_t xraw=0, yraw=0, zraw=0;
-	uint32_t msraw=0x80000000;
-};
+    uint16_t besttwoavg(uint16_t x, uint16_t y, uint16_t z) const;
+    void update();
 
-#endif
+    static constexpr uint32_t SPI_FREQUENCY { 2'500'000 };
+    static constexpr uint16_t Z_THRESHOLD { 400 };
+    static constexpr uint16_t Z_THRESHOLD_INT { 75 };
+    static constexpr uint32_t MSEC_THRESHOLD { 3 };
+
+    static XPT2046_Touchscreen* isrPinptr;
+
+    SPIClass* p_spi_;
+    SPISettings spisettings_;
+    volatile bool isrWake;
+    const uint8_t cs_;
+    const uint8_t tirq_;
+    uint8_t rotation_;
+    uint16_t xraw_;
+    uint16_t yraw_;
+    uint16_t zraw_;
+    uint32_t msraw_;
+};

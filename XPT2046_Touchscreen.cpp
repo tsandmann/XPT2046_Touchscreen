@@ -18,157 +18,163 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
+ *
+ * Adapted for use with the c't-Bot teensy framework and ported to C++14 by Timo Sandmann
  */
 
 #include "XPT2046_Touchscreen.h"
 
-#define Z_THRESHOLD     400
-#define Z_THRESHOLD_INT	75
-#define MSEC_THRESHOLD  3
-#define SPI_SETTING     SPISettings(2000000, MSBFIRST, SPI_MODE0)
 
-static XPT2046_Touchscreen 	*isrPinptr;
-void isrPin(void);
+XPT2046_Touchscreen* XPT2046_Touchscreen::isrPinptr {};
 
-bool XPT2046_Touchscreen::begin()
-{
-	SPI.begin();
-	pinMode(csPin, OUTPUT);
-	digitalWrite(csPin, HIGH);
-	if (255 != tirqPin) {
-		pinMode( tirqPin, INPUT );
-		attachInterrupt(digitalPinToInterrupt(tirqPin), isrPin, FALLING);
-		isrPinptr = this;
-	}
-	return true;
+XPT2046_Touchscreen::XPT2046_Touchscreen(uint8_t cspin, SPIClass* p_spi, uint8_t tirq)
+    : p_spi_ { p_spi }, isrWake { true }, cs_ { cspin }, tirq_ { tirq }, rotation_ { 1 }, xraw_ {}, yraw_ {}, zraw_ {}, msraw_ {} {}
+
+bool XPT2046_Touchscreen::begin() {
+    spisettings_ = SPISettings { SPI_FREQUENCY, MSBFIRST, SPI_MODE0 };
+
+    ::pinMode(cs_, OUTPUT);
+    ::digitalWrite(cs_, 1);
+
+    p_spi_->begin();
+
+    if (255 != tirq_) {
+        ::pinMode(tirq_, INPUT);
+        ::attachInterrupt(
+            digitalPinToInterrupt(tirq_),
+            []() {
+                auto ptr { XPT2046_Touchscreen::isrPinptr };
+                if (ptr) {
+                    ptr->isrWake = true;
+                }
+            },
+            FALLING);
+        isrPinptr = this;
+    }
+
+    msraw_ = ::millis();
+    return true;
 }
 
-#ifdef ESP32
-void IRAM_ATTR isrPin( void )
-#else
-void isrPin( void )
-#endif
-{
-	XPT2046_Touchscreen *o = isrPinptr;
-	o->isrWake = true;
+TS_Point XPT2046_Touchscreen::getPoint() {
+    update();
+    return TS_Point(xraw_, yraw_, zraw_);
 }
 
-TS_Point XPT2046_Touchscreen::getPoint()
-{
-	update();
-	return TS_Point(xraw, yraw, zraw);
+bool XPT2046_Touchscreen::tirqTouched() const {
+    return isrWake;
 }
 
-bool XPT2046_Touchscreen::tirqTouched()
-{
-	return (isrWake);
+bool XPT2046_Touchscreen::touched() {
+    update();
+    return zraw_ >= Z_THRESHOLD;
 }
 
-bool XPT2046_Touchscreen::touched()
-{
-	update();
-	return (zraw >= Z_THRESHOLD);
+void XPT2046_Touchscreen::readData(uint16_t* x, uint16_t* y, uint8_t* z) {
+    update();
+    *x = xraw_;
+    *y = yraw_;
+    *z = zraw_;
 }
 
-void XPT2046_Touchscreen::readData(uint16_t *x, uint16_t *y, uint8_t *z)
-{
-	update();
-	*x = xraw;
-	*y = yraw;
-	*z = zraw;
+bool XPT2046_Touchscreen::bufferEmpty() const {
+    return (::millis() - msraw_) < MSEC_THRESHOLD;
 }
 
-bool XPT2046_Touchscreen::bufferEmpty()
-{
-	return ((millis() - msraw) < MSEC_THRESHOLD);
-}
+uint16_t XPT2046_Touchscreen::besttwoavg(uint16_t x, uint16_t y, uint16_t z) const {
+    uint16_t da, db, dc;
+    uint16_t reta { 0 };
+    if (x > y) {
+        da = x - y;
+    } else {
+        da = y - x;
+    }
+    if (x > z) {
+        db = x - z;
+    } else {
+        db = z - x;
+    }
+    if (z > y) {
+        dc = z - y;
+    } else {
+        dc = y - z;
+    }
 
-static int16_t besttwoavg( int16_t x , int16_t y , int16_t z ) {
-  int16_t da, db, dc;
-  int16_t reta = 0;
-  if ( x > y ) da = x - y; else da = y - x;
-  if ( x > z ) db = x - z; else db = z - x;
-  if ( z > y ) dc = z - y; else dc = y - z;
+    if (da <= db && da <= dc) {
+        reta = (x + y) >> 1;
+    } else if (db <= da && db <= dc) {
+        reta = (x + z) >> 1;
+    } else {
+        reta = (y + z) >> 1;
+    }
 
-  if ( da <= db && da <= dc ) reta = (x + y) >> 1;
-  else if ( db <= da && db <= dc ) reta = (x + z) >> 1;
-  else reta = (y + z) >> 1;   //    else if ( dc <= da && dc <= db ) reta = (x + y) >> 1;
-
-  return (reta);
+    return reta;
 }
 
 // TODO: perhaps a future version should offer an option for more oversampling,
 //       with the RANSAC algorithm https://en.wikipedia.org/wiki/RANSAC
+void XPT2046_Touchscreen::update() {
+    if (!isrWake) {
+        return;
+    }
 
-void XPT2046_Touchscreen::update()
-{
-	int16_t data[6];
+    const uint32_t now { ::millis() };
+    if (now - msraw_ < MSEC_THRESHOLD) {
+        return;
+    }
 
-	if (!isrWake) return;
-	uint32_t now = millis();
-	if (now - msraw < MSEC_THRESHOLD) return;
-	
-	SPI.beginTransaction(SPI_SETTING);
-	digitalWrite(csPin, LOW);
-	SPI.transfer(0xB1 /* Z1 */);
-	int16_t z1 = SPI.transfer16(0xC1 /* Z2 */) >> 3;
-	int z = z1 + 4095;
-	int16_t z2 = SPI.transfer16(0x91 /* X */) >> 3;
-	z -= z2;
-	if (z >= Z_THRESHOLD) {
-		SPI.transfer16(0x91 /* X */);  // dummy X measure, 1st is always noisy
-		data[0] = SPI.transfer16(0xD1 /* Y */) >> 3;
-		data[1] = SPI.transfer16(0x91 /* X */) >> 3; // make 3 x-y measurements
-		data[2] = SPI.transfer16(0xD1 /* Y */) >> 3;
-		data[3] = SPI.transfer16(0x91 /* X */) >> 3;
-	}
-	else data[0] = data[1] = data[2] = data[3] = 0;	// Compiler warns these values may be used unset on early exit.
-	data[4] = SPI.transfer16(0xD0 /* Y */) >> 3;	// Last Y touch power down
-	data[5] = SPI.transfer16(0) >> 3;
-	digitalWrite(csPin, HIGH);
-	SPI.endTransaction();
-	//Serial.printf("z=%d  ::  z1=%d,  z2=%d  ", z, z1, z2);
-	if (z < 0) z = 0;
-	if (z < Z_THRESHOLD) { //	if ( !touched ) {
-		// Serial.println();
-		zraw = 0;
-		if (z < Z_THRESHOLD_INT) { //	if ( !touched ) {
-			if (255 != tirqPin) isrWake = false;
-		}
-		return;
-	}
-	zraw = z;
-	
-	// Average pair with least distance between each measured x then y
-	//Serial.printf("    z1=%d,z2=%d  ", z1, z2);
-	//Serial.printf("p=%d,  %d,%d  %d,%d  %d,%d", zraw,
-		//data[0], data[1], data[2], data[3], data[4], data[5]);
-	int16_t x = besttwoavg( data[0], data[2], data[4] );
-	int16_t y = besttwoavg( data[1], data[3], data[5] );
-	
-	//Serial.printf("    %d,%d", x, y);
-	//Serial.println();
-	if (z >= Z_THRESHOLD) {
-		msraw = now;	// good read completed, set wait
-		switch (rotation) {
-		  case 0:
-			xraw = 4095 - y;
-			yraw = x;
-			break;
-		  case 1:
-			xraw = x;
-			yraw = y;
-			break;
-		  case 2:
-			xraw = y;
-			yraw = 4095 - x;
-			break;
-		  default: // 3
-			xraw = 4095 - x;
-			yraw = 4095 - y;
-		}
-	}
+    p_spi_->beginTransaction(spisettings_);
+    ::digitalWrite(cs_, 0);
+    p_spi_->transfer(0xB1 /* Z1 */);
+    const auto z1 { p_spi_->transfer16(0xC1 /* Z2 */) >> 3U };
+    auto z { z1 + 4095U };
+    const auto z2 { p_spi_->transfer16(0x91 /* X */) >> 3U };
+    z -= z2;
+    uint16_t data[6];
+    if (z >= Z_THRESHOLD) {
+        p_spi_->transfer16(0x91 /* X */); // dummy X measure, 1st is always noisy
+        data[0] = p_spi_->transfer16(0xD1 /* Y */) >> 3;
+        data[1] = p_spi_->transfer16(0x91 /* X */) >> 3; // make 3 x-y measurements
+        data[2] = p_spi_->transfer16(0xD1 /* Y */) >> 3;
+        data[3] = p_spi_->transfer16(0x91 /* X */) >> 3;
+    }
+    data[4] = p_spi_->transfer16(0xD0 /* Y */) >> 3; // Last Y touch power down
+    data[5] = p_spi_->transfer16(0) >> 3;
+    ::digitalWrite(cs_, 1);
+    p_spi_->endTransaction();
+
+    if (z < Z_THRESHOLD) {
+        zraw_ = 0;
+        if (tirq_ != 255 && z < Z_THRESHOLD_INT) {
+            isrWake = false;
+        }
+        return;
+    }
+
+    zraw_ = z;
+
+    /* average pair with least distance between each measured x then y */
+    const auto x { besttwoavg(data[0], data[2], data[4]) };
+    const auto y { besttwoavg(data[1], data[3], data[5]) };
+
+    if (z >= Z_THRESHOLD) {
+        msraw_ = now; // good read completed, set wait
+        switch (rotation_) {
+            case 0:
+                xraw_ = 4095U - y;
+                yraw_ = x;
+                break;
+            case 1:
+                xraw_ = x;
+                yraw_ = y;
+                break;
+            case 2:
+                xraw_ = y;
+                yraw_ = 4095U - x;
+                break;
+            default: // 3
+                xraw_ = 4095U - x;
+                yraw_ = 4095U - y;
+        }
+    }
 }
-
-
-
