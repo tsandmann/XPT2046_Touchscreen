@@ -63,7 +63,7 @@ public:
     }
 
     void setRotation(uint8_t n) {
-        rotation_ = n % 4;
+        rotation_ = n % 5;
     }
 
 private:
